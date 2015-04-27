@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"code.google.com/p/gcfg"
+	"crypto/md5"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"io"
 	"log"
@@ -15,6 +18,8 @@ import (
 
 	"github.com/solvip/arbiter/backends"
 )
+
+var ErrUnsupportedProtocol = errors.New("unsupported protocol version")
 
 func start(listenAddr string) error {
 	ln, err := net.Listen("tcp", listenAddr)
@@ -85,13 +90,22 @@ func main() {
 }
 
 type connection struct {
-	wg      sync.WaitGroup
-	conn    net.Conn
-	R       chan Message // Only read from this channel
-	W       chan Message // Only write to this channel
-	cw      chan bool    // to close W
-	err     error
-	emu     sync.RWMutex
+	wg   sync.WaitGroup
+	conn net.Conn
+
+	// Messages received on conn will be published on R.
+	R chan Message
+
+	// Messages received on W will be written to conn.
+	W chan Message
+
+	// semaphore-channel to close W.
+	cw chan struct{}
+
+	// emu guards err
+	emu sync.RWMutex
+	err error
+
 	builder MessageBuilder
 }
 
@@ -110,13 +124,13 @@ func (c *connection) setError(err error) {
 }
 
 func (c *connection) Close() (err error) {
+	c.cw <- struct{}{} // close W
 	err = c.conn.Close()
-	c.cw <- true // close W
 	c.wg.Wait()
 	return err
 }
 
-func NewConnection(conn net.Conn, builder MessageBuilder) *connection {
+func newConnection(conn net.Conn, builder MessageBuilder) *connection {
 	c := new(connection)
 	c.conn = conn
 	c.builder = builder
@@ -124,7 +138,11 @@ func NewConnection(conn net.Conn, builder MessageBuilder) *connection {
 	// 32 is just some arbitary number somewhat larger than 0.
 	c.W = make(chan Message, 32)
 	c.R = make(chan Message, 32)
-	c.cw = make(chan bool)
+
+	// Buffered so that sending to cw, in order to close, doesn't block.
+	// If the goroutine is gone by that point - the gc will eventually
+	// remove cw.
+	c.cw = make(chan struct{}, 1)
 
 	// Start the reading side
 	go func() {
@@ -167,7 +185,7 @@ func NewConnection(conn net.Conn, builder MessageBuilder) *connection {
 		for {
 			select {
 			case <-c.cw:
-				close(c.cw)
+				close(c.W)
 				return
 			case msg := <-c.W:
 				if err = msg.EncodeTo(w); err != nil {
@@ -188,117 +206,240 @@ func NewConnection(conn net.Conn, builder MessageBuilder) *connection {
 	return c
 }
 
+// startup - Handle the startup of a connection.
+func handleStartup(conn net.Conn) (msg StartMessage, err error) {
+	const (
+		INIT = iota
+		INIT_SSL
+	)
+
+	state := INIT
+
+	// The only two possible state transitions are:
+	// INIT -> INIT_SSL -> INIT -> return
+	// INIT -> return
+	for i := 0; i < 3; i++ {
+		switch state {
+
+		case INIT:
+			if msg, err = readStartMessage(conn); err != nil {
+				return
+			}
+
+			switch msg.(type) {
+			case *Startup:
+				if msg.MajorVersion() == 3 && msg.MinorVersion() == 0 {
+					return
+				} else {
+					return nil, ErrUnsupportedProtocol
+				}
+
+			case *SSLRequest:
+				state = INIT_SSL
+
+			case *CancelRequest:
+				return
+			}
+
+		case INIT_SSL:
+			if _, err = conn.Write([]byte{'N'}); err != nil {
+				return
+			} else {
+				state = INIT
+			}
+		}
+	}
+
+	// Too many state transitions
+	return msg, ErrProtocolViolation
+}
+
+// handle the authentication phase.
+// As we cannot possibly pool sessions unless knowing the credentials, i.e., postgres
+// always sends us a unique salt for each md5 auth request, we need to MITM the
+// authentication phase.
+// If the server requests MD5 - we lie to the client and tell it we want password.
+// If the server trusts us - we extend that trust to the client.
+func handleAuthentication(frontend, backend *connection, startMsg StartMessage) (err error) {
+	checkErr := func() (err error) {
+		if err = frontend.Error(); err != nil {
+			return
+		}
+
+		if err = backend.Error(); err != nil {
+			return
+		}
+
+		return nil
+	}
+
+	const (
+		INIT = iota
+		AUTHREQ
+		PASSWORD
+		MD5PASSWORD
+		AUTHENTICATED
+	)
+
+	var authreq *AuthenticationRequest
+
+	for state := INIT; ; {
+		switch state {
+		case INIT:
+			backend.W <- startMsg
+			state = AUTHREQ
+
+		case AUTHREQ:
+			msg, ok := <-backend.R
+			if !ok {
+				return checkErr()
+			}
+
+			if authreq, ok = msg.(*AuthenticationRequest); !ok {
+				return ErrProtocolViolation
+			}
+
+			switch authreq.Type {
+			case OK:
+				frontend.W <- msg
+				state = AUTHENTICATED
+			case CleartextPassword:
+				frontend.W <- msg
+				state = PASSWORD
+			case MD5Password:
+				authreq.Type = CleartextPassword
+				frontend.W <- msg
+				state = MD5PASSWORD
+			default:
+				return ErrUnsupportedAuthenticationRequest
+			}
+
+		case PASSWORD:
+			msg, ok := <-frontend.R
+			if !ok {
+				return checkErr()
+			}
+
+			if password, ok := msg.(*PasswordMessage); !ok {
+				return ErrProtocolViolation
+			} else {
+				backend.W <- password
+			}
+
+			state = AUTHENTICATED
+
+		case MD5PASSWORD:
+			msg, ok := <-frontend.R
+			if !ok {
+				return checkErr()
+			}
+
+			passMsg, ok := msg.(*PasswordMessage)
+			if !ok {
+				return ErrProtocolViolation
+			}
+
+			// At this point, password is clear, but the server is expecting MD5.
+			// concat('md5', md5(concat(md5(concat(password, username)), random-salt)))
+			passMsg.SetPassword(saltPassword([]byte(startMsg.(*Startup).User()),
+				passMsg.Password(), authreq.Salt()))
+
+			backend.W <- passMsg
+			state = AUTHENTICATED
+
+		case AUTHENTICATED:
+			msg, ok := <-backend.R
+			if !ok {
+				return checkErr()
+			}
+
+			switch msg.(type) {
+			case *AuthenticationRequest:
+				if msg.(*AuthenticationRequest).Type == OK {
+					frontend.W <- msg
+				} else {
+					return ErrProtocolViolation
+				}
+			case *ErrorResponse:
+				if msg.(*ErrorResponse).Code() == "28P01" {
+					err = errors.New("invalid password")
+				} else {
+					err = errors.New("authentication failure")
+				}
+				frontend.W <- msg
+			default:
+				return ErrProtocolViolation
+			}
+
+			return
+		}
+	}
+
+	return
+}
+
+// md5hex - MD5 sum a byte slice, return it as a byte slice containing a hex-encoded string.
+func md5hex(s []byte) []byte {
+	var sum [16]byte = md5.Sum(s)
+
+	return []byte(hex.EncodeToString(sum[:]))
+}
+
+// saltPassword - Prepare a password for postgres
+// http://www.postgresql.org/docs/9.2/static/protocol-flow.html#AEN95360
+func saltPassword(username, password, salt []byte) []byte {
+	salted := md5hex(append(password, username...))
+	salted = md5hex(append(salted, salt...))
+
+	return append([]byte("md5"), salted...)
+}
+
 func handleClientConnection(frontendConn net.Conn) {
 	// Until client is authenticated - timeout in 60 seconds.
 	frontendConn.SetDeadline(time.Now().Add(60 * time.Second))
 
 	// First, we read the startup message.  it's handled different from the others,
 	// as it has no tag.
-	// XXX:  We also need to be able to handle CancelRequest at this point
-	startMsg := new(StartupMessage)
-	var err error
-	for i := 0; i < 2; i++ {
-		if err = startMsg.DecodeFrom(frontendConn); err != nil {
-			log.Printf("Couldn't read the startup message from frontend: %s", err)
-			return
-		}
-
-		switch {
-		case startMsg.MajorVersion() == 1234 && startMsg.MinorVersion() == 5679:
-			/* SSL handshaking would go here */
-			if _, err = frontendConn.Write([]byte{byte('N')}); err != nil {
-				log.Printf("Error writing to socket: %s", err)
-				return
-			}
-
-			continue
-
-		case startMsg.MajorVersion() == 3 && startMsg.MinorVersion() == 0:
-			// Supported protocol
-			break
-
-		default:
-			/* XXX:  Should return an error to client */
-			log.Printf("Unsupported protocol version %d %d",
-				startMsg.MajorVersion(), startMsg.MinorVersion())
-			return
-		}
-
-		break
-	}
-
-	backendConn, err := backends.DialPrimary()
+	startMsg, err := handleStartup(frontendConn)
 	if err != nil {
-		log.Printf("Couldn't retrieve a backend: %s", err)
+		log.Printf("Error handling StartupMessage from a client: %s", err)
 		frontendConn.Close()
 		return
 	}
-
-	frontend := NewConnection(frontendConn, frontendMessageBuilder)
+	frontend := newConnection(frontendConn, frontendMessageBuilder)
 	defer frontend.Close()
 
-	backend := NewConnection(backendConn, backendMessageBuilder)
-	defer backend.Close()
-
-	// Send the startmsg to the backend
-	backend.W <- startMsg
-
-	// Start the authentication step.
-	authenticated := false
-	for !authenticated {
-		if err := frontend.Error(); err == io.EOF {
-			log.Printf("unauthenticated client closed connection")
-			return
-		} else if err != nil {
-			log.Printf("frontend error in authentication step: %s", err)
-			return
-		}
-
-		if err = backend.Error(); err == io.EOF {
-			log.Printf("backend closed connection")
-			return
-		} else if err != nil {
-			log.Printf("backend error in authentication step: %s", err)
-			return
-		}
-
-		select {
-		case msg, ok := <-backend.R:
-			if !ok {
-				continue
-			}
-
-			switch msg.(type) {
-			case *ErrorResponse:
-				frontend.W <- msg
-			case *AuthenticationRequest:
-				frontend.W <- msg
-				if msg.(*AuthenticationRequest).Type == OK {
-					authenticated = true
-					break
-				}
-			}
-
-		case msg, ok := <-frontend.R:
-			if !ok {
-				continue
-			}
-
-			switch msg.(type) {
-			case *PasswordMessage:
-				backend.W <- msg
-			}
-		}
+	backendConn, err := backends.Dial()
+	if err != nil {
+		log.Printf("Couldn't retrieve a backend: %s", err)
+		return
 	}
 
-	// Auth done.  The client can stick around for as long as it wants.
-	var t time.Time // XXX:  No other way to find zero value of time?
-	frontendConn.SetDeadline(t)
+	backend := newConnection(backendConn, backendMessageBuilder)
+	defer backend.Close()
 
-	// Proxy!
+	// Fast-path if we were handling a CancelRequest.
+	if _, ok := startMsg.(*CancelRequest); ok {
+		backend.W <- startMsg
+		<-backend.R
+		return
+	}
+
+	err = handleAuthentication(frontend, backend, startMsg)
+	if err == io.EOF {
+		// Client closed connection
+		return
+	} else if err != nil {
+		log.Printf("Error in authentication phase: %s", err)
+		return
+	}
+
+	// Successfuly authenticated.  No more deadline.
+	frontendConn.SetDeadline(time.Time{})
+
 	for {
 		if err := frontend.Error(); err == io.EOF {
-			log.Printf("authenticated client closed connection")
+			// Client closed connection.  No retries.
 			return
 		} else if err != nil {
 			log.Printf("frontend error in proxy phase: %s", err)
@@ -321,6 +462,9 @@ func handleClientConnection(frontendConn net.Conn) {
 
 		case msg, ok := <-backend.R:
 			if ok {
+				if errorMsg, ok := msg.(*ErrorResponse); ok {
+					log.Printf("Error message from backend: %v", errorMsg)
+				}
 				frontend.W <- msg
 			}
 		}

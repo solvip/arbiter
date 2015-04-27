@@ -11,14 +11,13 @@ import (
 // We only partially do full parsing of messages, as we're not interested
 // in the contents of every message.
 
-// ProtocolViolation means that either the client or the server
-// broke the PostgreSQL client/server protocol
-var ProtocolViolation = errors.New("protocol violation")
+// ErrProtocolViolation means that either the client or the server broke the PostgreSQL client/server protocol
+var ErrProtocolViolation = errors.New("protocol violation")
 
 // We currently do not support all the PostgreSQL authentcation mechanisms.
-var UnsupportedAuthenticationRequest = errors.New("unsupported authentication request")
+var ErrUnsupportedAuthenticationRequest = errors.New("unsupported authentication request")
 
-// Each message must the following interface
+// Each message must implement the following interface
 type Message interface {
 	// Decode a message from r into self
 	DecodeFrom(r io.Reader) error
@@ -27,10 +26,21 @@ type Message interface {
 	EncodeTo(w io.Writer) error
 }
 
+type StartMessage interface {
+	// StartMessage types must implement Message
+	Message
+
+	// The major protocol version
+	MajorVersion() int
+
+	// The minor protocol version
+	MinorVersion() int
+}
+
 // A MessageBuilder receives a byte and returns the appropriate Message struct.
 type MessageBuilder func(byte) (Message, error)
 
-var UnknownMessage = errors.New("unknown message")
+var ErrUnknownMessage = errors.New("unknown message")
 
 // Maps the messages possible from a frontend to it's Message
 // err can only be UnknownMessage.
@@ -65,7 +75,7 @@ func frontendMessageBuilder(b byte) (ret Message, err error) {
 	case 'p':
 		ret = new(PasswordMessage)
 	default:
-		err = UnknownMessage
+		err = ErrUnknownMessage
 	}
 
 	return
@@ -122,7 +132,7 @@ func backendMessageBuilder(b byte) (ret Message, err error) {
 	case '3':
 		ret = new(CloseComplete)
 	default:
-		err = UnknownMessage
+		err = ErrUnknownMessage
 	}
 
 	return
@@ -135,12 +145,6 @@ func readInt32(r io.Reader) (n int32, err error) {
 
 func readInt16(r io.Reader) (n int16, err error) {
 	err = binary.Read(r, binary.BigEndian, &n)
-	return
-}
-
-func readBody(r io.Reader, len int32) (ret []byte, err error) {
-	ret = make([]byte, len-4)
-	_, err = io.ReadFull(r, ret)
 	return
 }
 
@@ -163,8 +167,8 @@ func readMessage(r io.Reader) (msglen int32, ret []byte, err error) {
 		return
 	}
 
-	ret, err = readBody(r, msglen)
-
+	ret = make([]byte, msglen-4)
+	_, err = io.ReadFull(r, ret)
 	return
 }
 
@@ -189,6 +193,201 @@ func writeMessage(w io.Writer, msgPrefix byte, fields ...[]byte) (err error) {
 	}
 
 	return
+}
+
+// Handling of startup messages.
+// - Startup
+// - SSLRequest
+// - CancelRequest
+
+// readStartMessage - Read the startup message, returning the appropriate
+// concrete type.
+func readStartMessage(r io.Reader) (msg StartMessage, err error) {
+	length, rawmsg, err := readMessage(r)
+	if err != nil {
+		return
+	}
+
+	rawmsg = append(int32bytes(int32(length)), rawmsg...)
+	reader := bytes.NewReader(rawmsg)
+
+	_, _ = readInt32(reader)
+	version, err := readInt32(reader)
+	if err != nil {
+		return
+	}
+
+	reader.Seek(0, 0)
+	switch version {
+	case 80877103:
+		msg = new(SSLRequest)
+		err = msg.DecodeFrom(reader)
+	case 80877102:
+		msg = new(CancelRequest)
+		err = msg.DecodeFrom(reader)
+	default:
+		msg = new(Startup)
+		err = msg.DecodeFrom(reader)
+	}
+
+	return
+}
+
+type Startup struct {
+	version    int32
+	parameters map[string]string
+}
+
+func (s *Startup) User() string {
+	return s.parameters["user"]
+}
+
+func (s *Startup) Database() string {
+	return s.parameters["database"]
+}
+
+func (s *Startup) DecodeFrom(r io.Reader) (err error) {
+	totalLen, err := readInt32(r)
+	if err != nil {
+		return err
+	}
+
+	s.version, err = readInt32(r)
+	s.parameters = make(map[string]string)
+
+	/* Subtract 8, 4 for message length, 4 for version */
+	rawParams := make([]byte, totalLen-8)
+	if _, err = io.ReadFull(r, rawParams); err != nil {
+		return err
+	}
+
+	params := bytes.Split(rawParams[0:len(rawParams)], []byte{0})
+
+	var key, val string
+	for i, item := range params {
+		/* At the end */
+		if len(item) == 0 {
+			break
+		}
+
+		if i%2 == 0 {
+			key = string(item)
+		} else {
+			val = string(item)
+			s.parameters[key] = val
+		}
+	}
+
+	return nil
+}
+
+func (s *Startup) MajorVersion() int {
+	return int(s.version >> 16)
+}
+
+func (s *Startup) MinorVersion() int {
+	return int(s.version & 0xFFFF)
+}
+
+func (s *Startup) EncodeTo(w io.Writer) (err error) {
+	// The binary format of the StartupMessage is:
+	// length 4 bytes
+	// version 4 bytes
+	// key val pairs, every field null terminated.
+	// null terminator 1 byte
+
+	/* 4 for version, 4 for length */
+	version := int32bytes(s.version)
+
+	params := make([]byte, 0)
+	for k, v := range s.parameters {
+		params = append(params, k...)
+		params = append(params, 0)
+
+		params = append(params, v...)
+		params = append(params, 0)
+	}
+	params = append(params, 0)
+
+	length := int32bytes(int32(4 + len(version) + len(params)))
+
+	err = WriteSlices(w, length, version, params)
+
+	return err
+}
+
+type SSLRequest struct{}
+
+func (s *SSLRequest) DecodeFrom(r io.Reader) (err error) {
+	len, err := readInt32(r)
+	if len != 8 {
+		return ErrProtocolViolation
+	}
+
+	version, err := readInt32(r)
+	if err != nil {
+		return
+	}
+
+	if version != 80877103 {
+		return ErrProtocolViolation
+	}
+
+	return
+}
+
+func (s *SSLRequest) EncodeTo(w io.Writer) (err error) {
+	return WriteSlices(w, int32bytes(8), int32bytes(80877103))
+}
+
+func (s *SSLRequest) MajorVersion() int {
+	return 1234
+}
+
+func (s *SSLRequest) MinorVersion() int {
+	return 5679
+}
+
+type CancelRequest struct {
+	pid    int32
+	secret int32
+}
+
+func (c *CancelRequest) DecodeFrom(r io.Reader) (err error) {
+	rint32 := func() (n int32) {
+		if err != nil {
+			return
+		}
+		n, err = readInt32(r)
+
+		return
+	}
+
+	length := rint32()
+	if length != 16 {
+		return ErrProtocolViolation
+	}
+
+	version := rint32()
+	if version != 80877102 {
+		return ErrProtocolViolation
+	}
+	c.pid = rint32()
+	c.secret = rint32()
+
+	return
+}
+
+func (c *CancelRequest) EncodeTo(w io.Writer) (err error) {
+	return WriteSlices(w, int32bytes(16), int32bytes(80877102), int32bytes(c.pid), int32bytes(c.secret))
+}
+
+func (c *CancelRequest) MajorVersion() int {
+	return 1234
+}
+
+func (c *CancelRequest) MinorVersion() int {
+	return 5678
 }
 
 type CopyInResponse []byte
@@ -306,7 +505,7 @@ func (e *EmptyQueryResponse) DecodeFrom(r io.Reader) (err error) {
 	if err != nil {
 		return
 	} else if msglen != 4 {
-		return ProtocolViolation
+		return ErrProtocolViolation
 	}
 
 	return
@@ -361,7 +560,7 @@ func (q *ReadyForQuery) DecodeFrom(r io.Reader) (err error) {
 	if err != nil {
 		return
 	} else if n != 5 {
-		return ProtocolViolation
+		return ErrProtocolViolation
 	}
 
 	q.status = msg[len(msg)-1]
@@ -385,7 +584,7 @@ func (p *ParameterStatus) DecodeFrom(r io.Reader) (err error) {
 	}
 
 	if i := bytes.IndexByte(msg, 0); i < 0 || i+1 > len(msg) {
-		return ProtocolViolation
+		return ErrProtocolViolation
 	} else {
 		p.name = msg[0 : i+1]
 		p.value = msg[i+1 : len(msg)]
@@ -408,7 +607,7 @@ func (b *BackendKeyData) DecodeFrom(r io.Reader) (err error) {
 	if err != nil {
 		return
 	} else if len != 12 {
-		return ProtocolViolation
+		return ErrProtocolViolation
 	}
 
 	b.pid, err = readInt32(r)
@@ -585,7 +784,7 @@ func (e *Terminate) DecodeFrom(r io.Reader) (err error) {
 	if err != nil {
 		return
 	} else if n != 4 {
-		return ProtocolViolation
+		return ErrProtocolViolation
 	}
 
 	return
@@ -602,7 +801,7 @@ func (e *Sync) DecodeFrom(r io.Reader) (err error) {
 	if err != nil {
 		return
 	} else if msglen != 4 {
-		err = ProtocolViolation
+		err = ErrProtocolViolation
 	}
 
 	return
@@ -650,6 +849,10 @@ func (e *ErrorResponse) EncodeTo(w io.Writer) (err error) {
 	return writeMessage(w, 'E', fields)
 }
 
+func (e *ErrorResponse) Code() string {
+	return e.fields[byte('C')]
+}
+
 type CopyDone struct{}
 
 func (c *CopyDone) DecodeFrom(r io.Reader) (err error) {
@@ -657,7 +860,7 @@ func (c *CopyDone) DecodeFrom(r io.Reader) (err error) {
 	if err != nil {
 		return
 	} else if n != 4 {
-		return ProtocolViolation
+		return ErrProtocolViolation
 	}
 
 	return
@@ -680,23 +883,40 @@ func (cd *CopyData) EncodeTo(w io.Writer) (err error) {
 	return writeMessage(w, 'd', cd.raw)
 }
 
-type PasswordMessage struct {
-	password []byte
-}
+// Internally, PasswordMessage is a null-terminated byte slice.
+// The accessor, Password(), returns it non-terminated.
+// The accessor, SetPassword(), appends a trailing null-byte.
+type PasswordMessage []byte
 
 func (p *PasswordMessage) DecodeFrom(r io.Reader) (err error) {
-	_, p.password, err = readMessage(r)
+	_, *p, err = readMessage(r)
 
 	return
 }
 
-func (p *PasswordMessage) EncodeTo(w io.Writer) (err error) {
-	return writeMessage(w, 'p', p.password)
+func (p PasswordMessage) EncodeTo(w io.Writer) (err error) {
+	return writeMessage(w, 'p', p)
+}
+
+func (p PasswordMessage) Password() []byte {
+	if n := len(p); n > 0 {
+		return p[:len(p)-1]
+	}
+
+	return []byte{}
+}
+
+func (p *PasswordMessage) SetPassword(newPass []byte) {
+	*p = append(newPass, 0)
 }
 
 type AuthenticationRequest struct {
 	Type AuthenticationType
 	salt []byte
+}
+
+func (a *AuthenticationRequest) Salt() []byte {
+	return a.salt
 }
 
 type AuthenticationType int32
@@ -713,31 +933,26 @@ const (
 )
 
 func (ar *AuthenticationRequest) EncodeTo(w io.Writer) (err error) {
+	msgType := int32bytes(int32(ar.Type))
 	switch ar.Type {
-	case OK, CleartextPassword, MD5Password:
-		break
+	case OK, CleartextPassword:
+		return writeMessage(w, 'R', msgType)
+	case MD5Password:
+		return writeMessage(w, 'R', msgType, ar.salt)
 	default:
-		return UnsupportedAuthenticationRequest
+		return ErrUnsupportedAuthenticationRequest
 	}
-
-	msgType := make([]byte, 4)
-	binary.BigEndian.PutUint32(msgType, uint32(ar.Type))
-
-	length := make([]byte, 4)
-	binary.BigEndian.PutUint32(length, uint32(len(length)+len(msgType)+len(ar.salt)))
-
-	return writeMessage(w, 'R', msgType, ar.salt)
 }
 
 // Decode into an AuthenticationRequest.
-// If the message type is incorrect, ProtocolViolation is returned.
-// If the authentication type is not supported, UnsupportedAuthenticationRequest is returned.
+// If the message type is incorrect, ErrProtocolViolation is returned.
+// If the authentication type is not supported, ErrUnsupportedAuthenticationRequest is returned.
 func (ar *AuthenticationRequest) DecodeFrom(r io.Reader) (err error) {
 	msglen, err := readInt32(r)
 	if err != nil {
 		return
 	} else if msglen < 8 {
-		return ProtocolViolation
+		return ErrProtocolViolation
 	}
 
 	if n, err := readInt32(r); err != nil {
@@ -760,88 +975,10 @@ func (ar *AuthenticationRequest) DecodeFrom(r io.Reader) (err error) {
 		}
 
 	default:
-		return UnsupportedAuthenticationRequest
+		return ErrUnsupportedAuthenticationRequest
 	}
 
 	return
-}
-
-type StartupMessage struct {
-	version    int32
-	parameters map[string]string
-}
-
-func (s *StartupMessage) DecodeFrom(r io.Reader) (err error) {
-	totalLen, err := readInt32(r)
-	if err != nil {
-		return err
-	}
-
-	if err = binary.Read(r, binary.BigEndian, &s.version); err != nil {
-		return err
-	}
-	s.parameters = make(map[string]string)
-
-	/* Subtract 8, 4 for message length, 4 for version */
-	rawParams := make([]byte, totalLen-8)
-	if _, err = io.ReadFull(r, rawParams); err != nil {
-		return err
-	}
-
-	params := bytes.Split(rawParams[0:len(rawParams)], []byte{0})
-
-	var key, val string
-	for i, item := range params {
-		/* At the end */
-		if len(item) == 0 {
-			break
-		}
-
-		if i%2 == 0 {
-			key = string(item)
-		} else {
-			val = string(item)
-			s.parameters[key] = val
-		}
-	}
-
-	return nil
-}
-
-func (s *StartupMessage) MajorVersion() int {
-	return int(s.version >> 16)
-}
-
-func (s *StartupMessage) MinorVersion() int {
-	return int(s.version & 0xFFFF)
-}
-
-func (s *StartupMessage) EncodeTo(w io.Writer) (err error) {
-	// The binary format of the StartupMessage is:
-	// length 4 bytes
-	// version 4 bytes
-	// key val pairs, every field null terminated.
-	// null terminator 1 byte
-
-	/* 4 for version, 4 for length */
-	version := int32bytes(s.version)
-
-	params := make([]byte, 0)
-	for k, v := range s.parameters {
-		params = append(params, k...)
-		params = append(params, 0)
-
-		params = append(params, v...)
-		params = append(params, 0)
-	}
-	params = append(params, 0)
-
-	length := make([]byte, 4)
-	binary.BigEndian.PutUint32(length, uint32(len(version)+len(length)+len(params)))
-
-	err = WriteSlices(w, length, version, params)
-
-	return err
 }
 
 func WriteSlices(w io.Writer, slices ...[]byte) (err error) {

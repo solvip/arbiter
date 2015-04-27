@@ -14,6 +14,7 @@ import (
 )
 
 var PrimaryNotFound = errors.New("primary database instance not found")
+var InstanceNotFound = errors.New("no available database instance found")
 
 var (
 	mu       sync.RWMutex
@@ -78,6 +79,29 @@ func DialPrimary() (c net.Conn, err error) {
 	return c, err
 }
 
+// Return a connection to a random backend
+func Dial() (c net.Conn, err error) {
+	retry := 2 * time.Millisecond
+
+	timeout := time.Now().Add(30 * time.Second)
+	for time.Now().Before(timeout) {
+		var addr string
+		addr, err = getBackend()
+		if err == nil {
+			c, err = net.DialTimeout("tcp", addr, 5*time.Second)
+			if err == nil {
+				return
+			}
+
+		}
+
+		time.Sleep(retry)
+		retry = retry * 2
+	}
+
+	return c, err
+}
+
 func getPrimary() (string, error) {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -89,6 +113,19 @@ func getPrimary() (string, error) {
 	}
 
 	return "", PrimaryNotFound
+}
+
+func getBackend() (string, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	for _, b := range backends {
+		if b.available {
+			return b.address, nil
+		}
+	}
+
+	return "", InstanceNotFound
 }
 
 // Monitor a backend

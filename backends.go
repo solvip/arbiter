@@ -107,10 +107,6 @@ func (m *BackendsMonitor) setBackendLatency(b *backend, latency time.Duration) {
 
 	b.latency = latency
 	sort.Sort(ByLatency(m.backends))
-
-	for _, b := range m.backends {
-		fmt.Printf("backend: %v\n", b)
-	}
 }
 
 type ByLatency []*backend

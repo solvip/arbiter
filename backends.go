@@ -119,7 +119,7 @@ func (m *BackendsMonitor) monitor(b *backend) {
 	var conn *sql.DB
 	var err error
 
-	connstring := fmt.Sprintf("postgres://%s:%s@%s/%s?connect_timeout=1&sslmode=disable",
+	connstring := fmt.Sprintf("postgres://%s:%s@%s/%s?connect_timeout=5&sslmode=disable",
 		m.user, m.pass, b.address, m.db)
 
 	log.Printf("Starting monitoring of %s", b.address)

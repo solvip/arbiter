@@ -38,17 +38,17 @@ type BackendsMonitor struct {
 	backends []*backend
 }
 
-type state int
+type State int
 
 const (
-	UNAVAILABLE state = iota
+	UNAVAILABLE State = iota
 	PRIMARY
 	FOLLOWER
 )
 
 type backend struct {
 	latency time.Duration
-	state   state
+	state   State
 	address string
 }
 
@@ -68,7 +68,7 @@ func (m *BackendsMonitor) Add(addr string) {
 	return
 }
 
-func (m *BackendsMonitor) DialTimeout(s state, timeout time.Duration) (net.Conn, error) {
+func (m *BackendsMonitor) DialTimeout(s State, timeout time.Duration) (net.Conn, error) {
 	m.RLock()
 	defer m.RUnlock()
 	for _, backend := range m.backends {
@@ -80,7 +80,7 @@ func (m *BackendsMonitor) DialTimeout(s state, timeout time.Duration) (net.Conn,
 	return nil, ErrNoInstance
 }
 
-func (m *BackendsMonitor) setBackendState(b *backend, newstate state) {
+func (m *BackendsMonitor) setBackendState(b *backend, newstate State) {
 	m.Lock()
 	defer m.Unlock()
 

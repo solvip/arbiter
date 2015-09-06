@@ -125,8 +125,7 @@ func (m *BackendsMonitor) monitor(b *backend) {
 	log.Printf("[Backend %s]: Starting monitoring", b.address)
 
 	// Ping the database every second
-	ticker := time.Tick(time.Second)
-	for _ = range ticker {
+	for _ = range time.Tick(time.Second) {
 		// Ensure that the monitoring connection is alive
 		if conn == nil {
 			conn, err = sql.Open("postgres", connstring)

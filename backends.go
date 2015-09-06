@@ -73,7 +73,16 @@ func (m *BackendsMonitor) DialTimeout(s State, timeout time.Duration) (net.Conn,
 	defer m.RUnlock()
 	for _, backend := range m.backends {
 		if backend.state == s {
-			return net.Dial("tcp", backend.address)
+			// Connect to the first backend we find.
+			// If the connection fails; mark the backend as unavailable before
+			// returning to the caller.
+			conn, err := net.DialTimeout("tcp", backend.address, timeout)
+			if err != nil {
+				backend.state = UNAVAILABLE
+				backend.latency = math.MaxInt64
+			}
+
+			return conn, err
 		}
 	}
 

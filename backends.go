@@ -122,7 +122,7 @@ func (m *BackendsMonitor) monitor(b *backend) {
 	connstring := fmt.Sprintf("postgres://%s:%s@%s/%s?connect_timeout=5&sslmode=disable",
 		m.user, m.pass, b.address, m.db)
 
-	log.Printf("Starting monitoring of %s", b.address)
+	log.Printf("[Backend %s]: Starting monitoring", b.address)
 
 	// Ping the database every second
 	ticker := time.Tick(time.Second)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"code.google.com/p/gcfg"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
-	"strings"
 	"sync"
 	"time"
 
@@ -42,37 +40,16 @@ func main() {
 	cfgPath := flag.String("f", "/etc/arbiter/config.ini", "The path to the arbiter configuration file")
 	flag.Parse()
 
-	var config struct {
-		Main struct {
-			Listen   string
-			Backends string
-		}
-
-		Health struct {
-			Username string
-			Password string
-			Database string
-		}
-	}
-
-	if err := gcfg.ReadFileInto(&config, *cfgPath); err != nil {
+	c, err := ConfigFromFile(*cfgPath)
+	if err != nil {
 		log.Fatalf("Could not load configuration file: %s", err)
 	}
 
-	for _, v := range strings.Split(config.Main.Backends, ",") {
-		backend := strings.TrimSpace(v)
-		if _, _, err := net.SplitHostPort(backend); err != nil {
-			log.Fatalf("Invalid backend %s", backend)
-		}
-
+	for _, backend := range c.Main.Backends {
 		backends.Add(backend,
-			config.Health.Database,
-			config.Health.Username,
-			config.Health.Password)
-	}
-
-	if backends.Count() == 0 {
-		log.Fatalf("No backends defined in configuration")
+			c.Health.Database,
+			c.Health.Username,
+			c.Health.Password)
 	}
 
 	// Start profiling server
@@ -82,7 +59,7 @@ func main() {
 
 	/* Config looks good.  Let's go. */
 	log.Printf("Starting up...")
-	if err := start(config.Main.Listen); err != nil {
+	if err := start(c.Main.Primary); err != nil {
 		log.Fatalf("Could not start Arbiter: %s", err)
 	}
 

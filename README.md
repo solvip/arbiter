@@ -12,9 +12,6 @@ Connections to the `follower` will be routed to the closest backend, measured by
 
 You should configure your application to connect to the `primary` if it performs destructive operations.  Connections to the `follower` should only be used for queries.
 
-# Failure modes
-In the case where no backend is primary, arbiter will stop listening on the `primary` address.  This allows for a clean failure mode for applications.
-
 # Configuration example
 
 ```ini

@@ -8,7 +8,7 @@ replication setups.
 
 When you start Arbiter, it listens on the `primary` and `follower` addresses defined in arbiter.cfg.
 Connections to the `primary` will always be routed to the backend that has the primary role.
-Connections to the `follower` will be routed to the closest backend, measured by latency.
+Connections to the `follower` will be routed to the closest backend, measured by latency, regardless if that backend is a primary or a follower.
 
 You should configure your application to connect to the `primary` if it performs destructive operations.  Connections to the `follower` should only be used for queries.
 

@@ -4,6 +4,8 @@ Arbiter
 Arbiter is a connection proxy for PostgreSQL, intended to simplify operations of streaming
 replication setups.
 
+[![Build Status](https://secure.travis-ci.org/solvip/arbiter.png)](http://travis-ci.org/solvip/arbiter)
+
 When you start Arbiter, it listens on the `primary` and `follower` addresses defined in arbiter.cfg.
 Connections to the `primary` will always be routed to the backend that has the primary role.
 Connections to the `follower` will be routed to the closest backend, measured by latency.

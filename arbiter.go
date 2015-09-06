@@ -43,61 +43,46 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Starting follower handler; listening on %s", c.Main.Follower)
-		if err := startHandler(c.Main.Follower, s.followerConnectionHandler); err != nil {
+		log.Printf("Starting follower listener; listening on %s", c.Main.Follower)
+		if err := s.startListener(c.Main.Follower, FOLLOWER); err != nil {
 			log.Fatalf("Could not start Arbiter: %s", err)
 		}
 	}()
 
-	log.Printf("Starting primary handler; listening on %s", c.Main.Primary)
-	if err := startHandler(c.Main.Primary, s.primaryConnectionHandler); err != nil {
+	log.Printf("Starting primary listener; listening on %s", c.Main.Primary)
+	if err := s.startListener(c.Main.Primary, PRIMARY); err != nil {
 		log.Fatalf("Could not start Arbiter: %s", err)
 	}
 
 	return
 }
 
-func startHandler(addr string, handler connectionHandler) error {
+func (s *server) startListener(addr string, state State) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 
 	for {
-		conn, err := ln.Accept()
+		clientConn, err := ln.Accept()
 		if err != nil {
 			log.Printf("Error accepting client: %s", err)
 			continue
 		}
 
-		go handler(conn)
+		go func() {
+			backendConn, err := s.monitor.DialTimeout(state, 5*time.Second)
+			if err != nil {
+				log.Printf("Couldn't retrieve a backend: %s", err)
+				clientConn.Close()
+				return
+			}
+
+			proxy(clientConn, backendConn)
+			clientConn.Close()
+			backendConn.Close()
+		}()
 	}
-}
-
-func (s *server) primaryConnectionHandler(clientConn net.Conn) {
-	backendConn, err := s.monitor.DialTimeout(PRIMARY, 5*time.Second)
-	if err != nil {
-		log.Printf("Couldn't retrieve a backend: %s", err)
-		clientConn.Close()
-		return
-	}
-
-	proxy(clientConn, backendConn)
-	clientConn.Close()
-	backendConn.Close()
-}
-
-func (s *server) followerConnectionHandler(clientConn net.Conn) {
-	backendConn, err := s.monitor.DialTimeout(PRIMARY, 5*time.Second)
-	if err != nil {
-		log.Printf("Couldn't retrieve a backend: %s", err)
-		clientConn.Close()
-		return
-	}
-
-	proxy(clientConn, backendConn)
-	clientConn.Close()
-	backendConn.Close()
 }
 
 // Proxy a <-> b until EOF.

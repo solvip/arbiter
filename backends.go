@@ -15,14 +15,18 @@ import (
 
 var ErrNoInstance = errors.New("no available instance")
 
-func NewBackendsMonitor(username, password, database string) (m *BackendsMonitor) {
-	m = &BackendsMonitor{
-		user: username,
-		pass: password,
-		db:   database,
-	}
+type State int
 
-	return m
+const (
+	UNAVAILABLE State = iota
+	PRIMARY
+	FOLLOWER
+)
+
+type backend struct {
+	latency time.Duration
+	state   State
+	address string
 }
 
 type BackendsMonitor struct {

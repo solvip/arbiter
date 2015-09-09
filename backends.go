@@ -30,8 +30,6 @@ type backend struct {
 }
 
 type BackendsMonitor struct {
-	sync.RWMutex
-
 	// Database credentials used for health checks
 	user string
 	pass string
@@ -39,26 +37,23 @@ type BackendsMonitor struct {
 
 	// A slice of backends; we enforce the invariant
 	// that backends is always sorted by latency.
+	mu       sync.RWMutex
 	backends []*backend
 }
 
-type State int
+func NewBackendsMonitor(username, password, database string) (m *BackendsMonitor) {
+	m = &BackendsMonitor{
+		user: username,
+		pass: password,
+		db:   database,
+	}
 
-const (
-	UNAVAILABLE State = iota
-	PRIMARY
-	FOLLOWER
-)
-
-type backend struct {
-	latency time.Duration
-	state   State
-	address string
+	return m
 }
 
 func (m *BackendsMonitor) Add(addr string) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	b := &backend{
 		address: addr,
@@ -73,8 +68,8 @@ func (m *BackendsMonitor) Add(addr string) {
 }
 
 func (m *BackendsMonitor) DialTimeout(s State, timeout time.Duration) (net.Conn, error) {
-	m.RLock()
-	defer m.RUnlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, backend := range m.backends {
 		if backend.state == s {
 			// Connect to the first backend we find.
@@ -94,8 +89,8 @@ func (m *BackendsMonitor) DialTimeout(s State, timeout time.Duration) (net.Conn,
 }
 
 func (m *BackendsMonitor) setBackendState(b *backend, newstate State) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	// If we're going to unavailable, max the latency so that this
 	// backend is always put at the end of m.backends.
@@ -106,8 +101,8 @@ func (m *BackendsMonitor) setBackendState(b *backend, newstate State) {
 }
 
 func (m *BackendsMonitor) setBackendLatency(b *backend, latency time.Duration) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	b.latency = latency
 	sort.Sort(ByLatency(m.backends))

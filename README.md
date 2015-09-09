@@ -16,17 +16,21 @@ You should configure your application to connect to the `primary` if it performs
 
 ```ini
 [main]
-;; The addresses that Arbiter listens on
+;; Connections to the primary address will get routed to
+;; the primary backend.  Suitable for INSERT/UPDATE/DELETEs.
 primary = 127.0.0.1:5433
+
+;; Connections to the follower address will get routed to
+;; any backend.  Suitable for SELECTs.
 follower = 127.0.0.1:5434
 
 ;; Backends is a comma seperated list of backend servers.
 backends = pg1:5432, pg2:5432
 
 [health]
-;; The username and password pair describe a PostgreSQL user that
-;; has SELECT permissions; used to query the status of the backends.
+;; The username and password pair describe a PostgreSQL user that has SELECT permissions.
+;; Used to query the status of the backends.
 username = arbiter
 password = arbiter
-database = arbiter
+database = repmgr
 ```

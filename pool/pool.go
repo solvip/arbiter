@@ -122,12 +122,12 @@ func (p *Pool) monitor(m *member) {
 			p.primary = m
 		}
 
+		m.lat = lat
 		if m.state != newstate {
 			log.Printf("%s: transitioning to %s", m, newstate)
 		}
 
 		m.state = newstate
-		m.lat = lat
 		sort.Sort(byLatency(p.avail))
 
 		p.Unlock()

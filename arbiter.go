@@ -145,7 +145,7 @@ func (s *server) startListener(addr string, state pool.State) error {
 
 // Proxy frontend <-> backend.
 // err will be the first error encountered reading from- or writing to backend.
-func (s *server) proxy(frontend, backend io.ReadWriter) (err error) {
+func (s *server) proxy(frontend, backend net.Conn) (err error) {
 	errch := make(chan error)
 
 	// Proxy frontend -> backend
@@ -155,9 +155,11 @@ func (s *server) proxy(frontend, backend io.ReadWriter) (err error) {
 
 		buf := make([]byte, 4096)
 		for {
+			backend.SetWriteDeadline(time.Time{})
 			n, rerr = frontend.Read(buf)
 			s.transferred.Add(int64(n))
 			if n > 0 {
+				backend.SetWriteDeadline(time.Now().Add(1 * time.Second))
 				n, werr = backend.Write(buf[0:n])
 				if werr != nil {
 					errch <- werr
@@ -178,9 +180,11 @@ func (s *server) proxy(frontend, backend io.ReadWriter) (err error) {
 
 		buf := make([]byte, 4096)
 		for {
+			frontend.SetWriteDeadline(time.Time{})
 			n, rerr = backend.Read(buf)
 			s.transferred.Add(int64(n))
 			if n > 0 {
+				frontend.SetWriteDeadline(time.Now().Add(1 * time.Second))
 				n, werr = frontend.Write(buf[0:n])
 				if werr != nil {
 					break

@@ -106,9 +106,10 @@ func (s *server) startListener(addr string, state pool.State) error {
 		}
 
 		go func() {
-			defer clientConn.Close()
-
 			s.nconns.Add(1)
+			defer clientConn.Close()
+			defer s.nconns.Add(-1)
+
 			var err error
 			var backend pool.Backend
 
@@ -118,7 +119,7 @@ func (s *server) startListener(addr string, state pool.State) error {
 			case pool.READ_WRITE:
 				backend, err = s.pool.GetForWrite()
 			default:
-				panic("Unknown state " + state.String())
+				panic("Unknown state")
 			}
 
 			if err != nil {
@@ -135,10 +136,9 @@ func (s *server) startListener(addr string, state pool.State) error {
 
 			err = s.proxy(clientConn, backendConn)
 			if err != io.EOF {
-				log.Printf("Error writing to or reading from backend: %v", err)
+				log.Printf("Error writing to or reading from backend: %s", err)
 				backend.Fail()
 			}
-			s.nconns.Add(-1)
 		}()
 	}
 }

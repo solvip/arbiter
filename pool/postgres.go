@@ -39,6 +39,8 @@ func (p *pg) Ping() (s State, err error) {
 		}
 	}
 
+	p.db.SetMaxOpenConns(1)
+
 	if err = p.db.Ping(); err != nil {
 		return s, err
 	}

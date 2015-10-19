@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"github.com/solvip/arbiter/pool"
 	"io"
 	"log"
 	"net"
@@ -15,7 +16,7 @@ import (
 type connectionHandler func(net.Conn)
 
 type server struct {
-	monitor *BackendsMonitor
+	pool *pool.Pool
 
 	// Bytes transferred
 	transferred AtomicInt
@@ -46,11 +47,11 @@ func main() {
 	}
 
 	s := &server{
-		monitor: NewBackendsMonitor(c.Health.Username, c.Health.Password, c.Health.Database),
+		pool: pool.New(),
 	}
 
 	for _, addr := range c.Main.Backends {
-		s.monitor.Add(addr)
+		s.pool.Put(pool.NewPostgresBackend(addr, c.Health.Username, c.Health.Password, c.Health.Database))
 	}
 
 	go func() {
@@ -61,13 +62,13 @@ func main() {
 
 	go func() {
 		log.Printf("Starting follower listener; listening on %s", c.Main.Follower)
-		if err := s.startListener(c.Main.Follower, FOLLOWER); err != nil {
+		if err := s.startListener(c.Main.Follower, pool.READ_ONLY); err != nil {
 			log.Fatalf("Could not start Arbiter: %s", err)
 		}
 	}()
 
 	log.Printf("Starting primary listener; listening on %s", c.Main.Primary)
-	if err := s.startListener(c.Main.Primary, PRIMARY); err != nil {
+	if err := s.startListener(c.Main.Primary, pool.READ_WRITE); err != nil {
 		log.Fatalf("Could not start Arbiter: %s", err)
 	}
 
@@ -91,7 +92,7 @@ func (s *server) handleStats(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (s *server) startListener(addr string, state State) error {
+func (s *server) startListener(addr string, state pool.State) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -106,27 +107,45 @@ func (s *server) startListener(addr string, state State) error {
 
 		go func() {
 			s.nconns.Add(1)
-			backendConn, err := s.monitor.DialTimeout(state, 5*time.Second)
+			defer clientConn.Close()
+			defer s.nconns.Add(-1)
+
+			var err error
+			var backend pool.Backend
+
+			switch state {
+			case pool.READ_ONLY:
+				backend, err = s.pool.GetForRead()
+			case pool.READ_WRITE:
+				backend, err = s.pool.GetForWrite()
+			default:
+				panic("Unknown state")
+			}
+
 			if err != nil {
 				log.Printf("Couldn't retrieve a backend: %s", err)
-				clientConn.Close()
 				return
 			}
 
-			backendErr := s.proxy(clientConn, backendConn)
-			if backendErr != io.EOF {
-				log.Printf("Error wrting to backend: %v", backendErr)
+			backendConn, err := backend.Connect(5 * time.Second)
+			if err != nil {
+				log.Printf("Couldn't connect to backend: %s", err)
+				return
 			}
-			backendConn.Close()
-			clientConn.Close()
-			s.nconns.Add(-1)
+			defer backendConn.Close()
+
+			err = s.proxy(clientConn, backendConn)
+			if err != io.EOF {
+				log.Printf("Error writing to or reading from backend: %s", err)
+				backend.Fail()
+			}
 		}()
 	}
 }
 
 // Proxy frontend <-> backend.
 // err will be the first error encountered reading from- or writing to backend.
-func (s *server) proxy(frontend, backend io.ReadWriter) (err error) {
+func (s *server) proxy(frontend, backend net.Conn) (err error) {
 	errch := make(chan error)
 
 	// Proxy frontend -> backend
@@ -136,9 +155,11 @@ func (s *server) proxy(frontend, backend io.ReadWriter) (err error) {
 
 		buf := make([]byte, 4096)
 		for {
+			backend.SetWriteDeadline(time.Time{})
 			n, rerr = frontend.Read(buf)
 			s.transferred.Add(int64(n))
 			if n > 0 {
+				backend.SetWriteDeadline(time.Now().Add(1 * time.Second))
 				n, werr = backend.Write(buf[0:n])
 				if werr != nil {
 					errch <- werr
@@ -159,9 +180,11 @@ func (s *server) proxy(frontend, backend io.ReadWriter) (err error) {
 
 		buf := make([]byte, 4096)
 		for {
+			frontend.SetWriteDeadline(time.Time{})
 			n, rerr = backend.Read(buf)
 			s.transferred.Add(int64(n))
 			if n > 0 {
+				frontend.SetWriteDeadline(time.Now().Add(1 * time.Second))
 				n, werr = frontend.Write(buf[0:n])
 				if werr != nil {
 					break

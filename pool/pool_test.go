@@ -94,6 +94,6 @@ func (m *mockend) Addr() string {
 	return "foo"
 }
 
-func (m *mockend) Connect(t time.Duration) (c Conn, err error) {
+func (m *mockend) Connect(t time.Duration) (c *Conn, err error) {
 	return c, err
 }

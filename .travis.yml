@@ -1,13 +1,21 @@
 notifications:
-    email:
-        on_success: never
-        on_failure: always
+  email:
+    on_success: never
+    on_failure: always
 
 language: go
 
 go:
-    - 1.4
-    - 1.5
-    - tip
+- 1.4
+- 1.5
+- tip
 
 script: go test -v ./...
+
+deploy:
+  provider: releases
+  api_key:
+    secure: hfET8FGW2muBmzmrKdn5XIjYij3YyqbFXGcMx5Bu5gmjbNFYq3IVo9IBcC2v3fTBkzt8SaQK+GStxcVRbThlTKwnvysNTOm/0M1klxzJgEVcMKeFqj7aPTsX0TIRHkc7qMniUpRyQGuXNlgy1ba20u63bodwDH3ENYmt60nGbn9rStNwmqXGELrXPe3eQc0zuSEiaL46SItFIz8dzei7maINbM2IqwAOQmt/h8I2ztmpZ8+RC/kYnTUaIob6Agf947E8bz753qSUqUTqF+XftdH8mInkyl0s/cNNPY8o1HcQxNxlwGa7K+aAANetcQ90Xp0jy39Usd2pKGQgYI6rZhO79cELDgFWAAVF5mdot2xGchZhXFwAl+HmVjWeaBKP1M4q9YWnBwG53+C8yBZVjV17fLuPSthJG9aXR05kFrHCEnW9WN/Ty5+sq9QF67FjrndpC3CluVJk3SuY9wyhc+DSdyooe57ObD7cjpiUQT6a01ZX2SBEwT2+vYrgdF6FvwCkvJCiLf6awC7WUtoOK9mwK+VhoNVtMPPAMemo15WjzskN45BfoFk6FWsIGjRMd/qrPj4D4dVlMqQLfQz9SzjO0CnlAtv4vhh4cpLP0mzFb7k0v5kpcVTB3L5FvwcpzWhHVB6DTWVkyqYRwHxOfJ4bHHhvzoHV/7aKGJNLwVw=
+  file: arbiter
+  on:
+    repo: solvip/arbiter

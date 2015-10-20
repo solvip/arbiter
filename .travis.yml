@@ -10,7 +10,7 @@ go:
 - 1.5
 - tip
 
-script: go test -v ./...
+script: go test -v ./... && go build
 
 deploy:
   provider: releases

@@ -6,9 +6,7 @@ notifications:
 language: go
 
 go:
-- 1.4
 - 1.5
-- tip
 
 script: go test -v ./... && go build
 

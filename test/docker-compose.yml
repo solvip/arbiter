@@ -1,0 +1,18 @@
+primary:
+  build: .
+  ports:
+  - "5432:5432"
+  volumes:
+  - ./:/arbiter:ro
+  command: sh /arbiter/start-primary.sh
+
+follower:
+  build: .
+  ports:
+  - "5433:5432"
+  links:
+  - primary:5432
+  volumes:
+  - ./:/arbiter:ro
+  command: sh /arbiter/start-follower.sh
+  
